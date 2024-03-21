@@ -30,6 +30,11 @@ from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xywhn2xyxy, 
     resample_segments, clean_str
 from utils.torch_utils import torch_distributed_zero_first
 
+# import rospy
+# from sensor_msgs.msg import Image
+# from cv_bridge import CvBridge, CvBridgeError
+
+
 # Parameters
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
 img_formats = ['bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng', 'webp', 'mpo']  # acceptable image suffixes
@@ -334,6 +339,68 @@ class LoadStreams:  # multiple IP or RTSP cameras
 
         # Convert
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
+        img = np.ascontiguousarray(img)
+
+        return self.sources, img, img0, None
+
+    def __len__(self):
+        return 0  # 1E12 frames = 32 streams at 30 FPS for 30 years
+
+
+class LoadRosStreams:  # Stream from ROS
+    def __init__(self, source='ros', img_size=640, stride=32):
+        self.mode = 'stream'
+        self.img_size = img_size
+        self.stride = stride
+        self.sources = source
+
+        rospy.init_node('roscam_detect', anonymous=True)
+        global count_ros, bridge_ros
+        count_ros = 0
+        bridge_ros = CvBridge()
+        
+        thread = Thread(target=self.update, daemon=True)
+        thread.start()
+
+        # check for common shapes
+        # s = np.stack([letterbox(x, self.img_size, stride=self.stride)[0].shape for x in self.imgs], 0)  # shapes
+        # self.rect = np.unique(s, axis=0).shape[0] == 1  # rect inference if all shapes equal
+        # if not self.rect:
+        #     print('WARNING: Different stream shapes detected. For optimal performance supply similarly-shaped streams.')
+        self.rect = True
+
+    def callback(self, data):
+        global count_ros, bridge_ros
+        count_ros += 1
+        if count_ros == 1:
+            count_ros = 0
+            self.imgs = bridge_ros.imgmsg_to_cv2(data, "bgr8")
+            # print("success to load image from ros")
+            # print('')  # newline
+        else:
+            pass
+
+    def update(self):
+        # Read next stream frame in a daemon thread
+        rospy.Subscriber('hikrobot_camera/rgb', Image, callback=self.callback)
+        rospy.spin()
+
+    def __iter__(self):
+        self.count = -1
+        return self
+
+    def __next__(self):
+        self.count += 1
+        img0 = self.imgs.copy()
+        if cv2.waitKey(1) == ord('q'):  # q to quit
+            cv2.destroyAllWindows()
+            raise StopIteration
+
+        # Letterbox
+        img = letterbox(img0, self.img_size, stride=self.stride)[0]
+
+        # Convert
+        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
 
         return self.sources, img, img0, None
